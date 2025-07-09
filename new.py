@@ -8,14 +8,14 @@ import google.generativeai as genai
 from pydantic import BaseModel
 from PIL import Image
 import pandas as pd
-from translate import Translator
+# from translate import Translator
 import re
 
 # =============== CONFIG ===============
 GEMINI_API_KEY = "AIzaSyAnPBedVewH06WOgcc_ufnAZIU81XjMTo8"
 genai.configure(api_key=GEMINI_API_KEY)
 
-translator = Translator(to_lang="en")
+# translator = Translator(to_lang="en")
 
 # =============== RESPONSE SCHEMA ===============
 class ClassifiedAd(BaseModel):
@@ -83,12 +83,15 @@ You are an expert at extracting structured information from images. Carefully re
     images = [Image.open(p) for p in column_image_paths]
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        gemini_response = model.generate_content([prompt] + images, generation_config={"response_mime_type": "application/json"})
+        model = genai.GenerativeModel('gemini-2.5-flash')  # ✅ switched to 2.5
+        gemini_response = model.generate_content(
+            [prompt] + images,
+            generation_config={"response_mime_type": "application/json"}
+        )
 
         response_text = gemini_response.text
 
-        # Optional: Clean any trailing text
+        # Clean JSON response
         json_text = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_text:
             response_data = json.loads(json_text.group())
@@ -98,13 +101,13 @@ You are an expert at extracting structured information from images. Carefully re
 
     except json.JSONDecodeError as e:
         st.error(f"❌ JSON Parsing error: {e}")
-        st.error("Raw response for debugging:")
         st.text_area("Response Text", response_text, height=300)
 
     except Exception as e:
         st.error(f"❌ Error extracting ads: {e}")
 
     return structured_ads
+
 
 # =============== TRANSLATE FUNCTION ===============
 from deep_translator import GoogleTranslator
