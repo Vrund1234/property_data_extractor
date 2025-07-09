@@ -4,18 +4,19 @@ import cv2
 import json
 import tempfile
 import os
-import google.generativeai as genai
+from google import genai
 from pydantic import BaseModel
 from PIL import Image
 import pandas as pd
-from translate import Translator
-import re
+from deep_translator import GoogleTranslator
+
 
 # =============== CONFIG ===============
-GEMINI_API_KEY = "AIzaSyAnPBedVewH06WOgcc_ufnAZIU81XjMTo8"
-genai.configure(api_key=GEMINI_API_KEY)
+GEMINI_API_KEY = "AIzaSyBdyEnkr0vnwqva4nULt1rY0_9QCfm5gDc"
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-translator = Translator(to_lang="en")
+translator = GoogleTranslator(source='auto', target='en')
+
 
 # =============== RESPONSE SCHEMA ===============
 class ClassifiedAd(BaseModel):
@@ -25,6 +26,7 @@ class ClassifiedAd(BaseModel):
     Address: str | None
     Contact_Number: str | None
     Property_For: str | None
+
 
 # =============== SEGMENT FUNCTION ===============
 def segment_image(image_path):
@@ -56,71 +58,50 @@ def segment_image(image_path):
 
     return column_paths
 
-# =============== EXTRACT FUNCTION (SAFE PARSE) ===============
+
+# =============== EXTRACT FUNCTION (ONE CALL) ===============
 def extract_ads(column_image_paths):
     structured_ads = []
 
     prompt = """
-You are an expert at extracting structured information from images. Carefully read the property ads from the images and return only valid JSON in the following format (no explanations):
+    Extract structured property details from the classified ads in these images.
 
-{
-  "ads": [
+    Example output:
     {
-      "Type": "",
-      "Vaar": "",
-      "SqFeet": "",
-      "Address": "",
-      "Contact_Number": "",
-      "Property_For": ""
-    },
-    ...
-  ]
-}
+        "ads": [
+            {"Type": "2 BHK Flat", "Vaar": "1500", "SqFeet": "400", "Address": "Manekbaug Ambawadi", "Contact_Number": "9909935387", "Property_For": "For Sale"}
+        ]
+    }
 
-⚠️ Do not write anything except the JSON. No explanations. No introductions.
+    Do not change the extracted text; return it exactly.
     """
 
     images = [Image.open(p) for p in column_image_paths]
 
+    gemini_response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[prompt] + images,
+        config={"response_mime_type": "application/json"},
+    )
+
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        gemini_response = model.generate_content([prompt] + images, generation_config={"response_mime_type": "application/json"})
-
-        response_text = gemini_response.text
-
-        # Optional: Clean any trailing text
-        json_text = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_text:
-            response_data = json.loads(json_text.group())
-            structured_ads = response_data.get("ads", [])
-        else:
-            st.error("❌ Could not find valid JSON in response.")
-
-    except json.JSONDecodeError as e:
-        st.error(f"❌ JSON Parsing error: {e}")
-        st.error("Raw response for debugging:")
-        st.text_area("Response Text", response_text, height=300)
-
+        response_text = gemini_response.candidates[0].content.parts[0].text
+        response_data = json.loads(response_text)
+        structured_ads = response_data.get("ads", [])
     except Exception as e:
-        st.error(f"❌ Error extracting ads: {e}")
+        st.error(f"Error extracting ads: {e}")
 
     return structured_ads
 
+
 # =============== TRANSLATE FUNCTION ===============
-from deep_translator import GoogleTranslator
-
-translator = GoogleTranslator(source='auto', target='en')
-
 def translate_ads(ads):
     translated_ads = []
     for ad in ads:
         translated_ad = {}
         for key, value in ad.items():
             if value:
-                try:
-                    translated_value = translator.translate(value)
-                except Exception:
-                    translated_value = value
+                translated_value = translator.translate(value)
                 translated_ad[key] = translated_value
             else:
                 translated_ad[key] = None
@@ -132,15 +113,20 @@ def translate_ads(ads):
 st.set_page_config(page_title="Property Ads Extractor")
 
 st.title("📰 Property Ads Extractor")
+# st.write(
+#     "Upload a scanned newspaper page — this app will detect columns, run OCR using Gemini 2.5, and extract & translate property ads to English."
+# )
 
-uploaded_file = st.file_uploader("📤 Upload your newspaper image (JPG, PNG)", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader(
+    "📤 Upload your newspaper image (JPG, PNG)", type=["jpg", "jpeg", "png"]
+)
 
 if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
         tmp_file.write(uploaded_file.read())
         temp_image_path = tmp_file.name
 
-    st.image(temp_image_path, caption="Uploaded Scan", use_container_width=True)
+    st.image(temp_image_path, caption=f"Uploaded Scan", use_container_width=True)
 
     if st.button("🔍 Extract & Translate Ads"):
         with st.spinner("Segmenting columns, extracting ads, and translating to English..."):
@@ -154,14 +140,17 @@ if uploaded_file is not None:
                 st.session_state["ads_df"] = df
 
                 st.success(f"✅ Extracted & Translated {len(translated_ads)} ads!")
-            else:
-                st.warning("⚠️ No ads extracted. Please try with another image or check the image quality.")
 
     if "ads_df" in st.session_state:
         st.dataframe(st.session_state["ads_df"])
 
         csv = st.session_state["ads_df"].to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download CSV", csv, file_name="property_data.csv", mime="text/csv")
+        st.download_button(
+            "📥 Download CSV",
+            csv,
+            file_name="property_data.csv",
+            mime="text/csv",
+        )
     else:
         st.info("👆 Click 'Extract & Translate Ads' to see results.")
 
