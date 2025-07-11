@@ -29,8 +29,6 @@ translator = load_translator()
 model = load_gemini_model()
 
 # =============== Newspaper Detection + Date Extraction ===============
-import dateparser
-
 def detect_newspaper_name_and_date(image_path):
     try:
         img = cv2.imread(image_path)
@@ -57,7 +55,6 @@ def detect_newspaper_name_and_date(image_path):
                 detected_name = paper
                 break
 
-        # Add more patterns
         date_pattern = r'\b(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b'
         match = re.search(date_pattern, combined_text)
         detected_date = match.group(1) if match else "Unknown Date"
@@ -69,15 +66,26 @@ def detect_newspaper_name_and_date(image_path):
             except:
                 pass
 
+        if detected_name != "Unknown Newspaper":
+            try:
+                detected_name = translator.translate(detected_name)
+            except:
+                pass
+
+        if detected_date != "Unknown Date":
+            try:
+                detected_date = translator.translate(detected_date)
+            except:
+                pass
+
         st.write("📰 Detected Text (Partial):", combined_text[:500])
         st.write(f"✅ Newspaper: {detected_name} | 🗓️ Date: {detected_date}")
 
-        return detected_name, detected_date
+        return detected_name.strip(), detected_date.strip()
 
     except Exception as e:
         st.error(f"❌ Newspaper detection/date extraction error: {e}")
         return "Unknown Newspaper", "Unknown Date"
-
 
 # =============== Segment Function ===============
 def segment_image(image_path, resize_width=1200):
@@ -115,24 +123,33 @@ def segment_image(image_path, resize_width=1200):
 # =============== Extract Function ===============
 def extract_ads(column_buffers, newspaper_name, date):
     prompt = f"""
-You are an expert at extracting property ads. Return only this JSON:
+You are an expert at extracting property ads. For each ad, output a JSON array where each ad must have:
+- Type
+- Var (number only)
+- SqFeet
+- Address
+- Contact_Number (only digits, remove spaces, dashes)
+- Property_For
+- Price
+- Newspaper_Name: {newspaper_name}
+- Date: {date}
 
+Return JSON only. Example:
 {{
   "ads": [
     {{
-      "Type": "",
-      "Var": "",
-      "SqFeet": "",
-      "Address": "",
-      "Contact_Number": "",
-      "Property_For": "",
-      "Price": "",
-      "Newspaper_Name": "{newspaper_name}",
-      "Date": "{date}"
+      "Type": "...",
+      "Var": "...",
+      "SqFeet": "...",
+      "Address": "...",
+      "Contact_Number": "...",
+      "Property_For": "...",
+      "Price": "...",
+      "Newspaper_Name": "...",
+      "Date": "..."
     }}
   ]
 }}
-No explanation. Just JSON.
 """
 
     images = [Image.open(buf) for buf in column_buffers]
@@ -149,8 +166,7 @@ No explanation. Just JSON.
 
 # =============== Translate & Clean Function ===============
 def translate_and_clean_ads(ads):
-    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    junk_keywords = {"drop", "engine", "ad", "classified", "advertisement"}
+    weekdays = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
     translated = []
 
     for ad in ads:
@@ -161,96 +177,35 @@ def translate_and_clean_ads(ads):
                     value = translator.translate(value)
                 except:
                     pass
-                cleaned_ad[key] = value
+                cleaned_ad[key] = value.strip()
             else:
-                cleaned_ad[key] = value
+                cleaned_ad[key] = value.strip()
 
-        # Re-parse and format date
-        if cleaned_ad["Date"] and cleaned_ad["Date"] != "Unknown Date":
-            try:
-                parsed_date = parser.parse(cleaned_ad["Date"], dayfirst=True)
-                cleaned_ad["Date"] = parsed_date.strftime("%Y-%m-%d")
-            except:
-                pass
+        try:
+            parsed_date = parser.parse(cleaned_ad.get("Date", ""), dayfirst=True)
+            cleaned_ad["Date"] = parsed_date.strftime("%Y-%m-%d")
+        except:
+            pass
 
-        # Fix Var and SqFeet logic
-        var = cleaned_ad.get("Var", "").lower()
-        if any(day in var for day in weekdays):
-            cleaned_ad["Var"] = ""
-        else:
-            var_numbers = re.findall(r'\d+', var)
-            cleaned_ad["Var"] = var_numbers[0] if var_numbers else ""
+        var = cleaned_ad.get("Var", "")
+        var_numbers = re.findall(r'\d+', var)
+        cleaned_ad["Var"] = var_numbers[0] if var_numbers else ""
 
         sqfeet = cleaned_ad.get("SqFeet", "")
-        try:
-            var_val = float(cleaned_ad["Var"]) if cleaned_ad["Var"] else None
-        except:
-            var_val = None
-        try:
-            sqfeet_val = float(re.findall(r'\d+', sqfeet)[0]) if sqfeet else None
-        except:
-            sqfeet_val = None
+        sqfeet_numbers = re.findall(r'\d+', sqfeet)
+        cleaned_ad["SqFeet"] = sqfeet_numbers[0] if sqfeet_numbers else ""
 
-        if var_val and not sqfeet_val:
-            sqfeet_val = var_val * 9
-        elif sqfeet_val and not var_val:
-            var_val = sqfeet_val / 9
-
-        cleaned_ad["Var"] = f"{var_val:.2f}" if var_val else ""
-        cleaned_ad["SqFeet"] = f"{sqfeet_val:.2f}" if sqfeet_val else ""
-
-        # Fix Address
-        addr = cleaned_ad.get("Address", "").strip()
+        addr = cleaned_ad.get("Address", "")
         addr = re.sub(r'[^A-Za-z0-9 ,.-]', '', addr)
-        if len(addr) < 5:
-            addr = ""
-        cleaned_ad["Address"] = addr
+        cleaned_ad["Address"] = addr.strip()
 
-        # ================= PRICE UNIT LOGIC ==================
-        price = cleaned_ad.get("Price", "")
-        price_lower = price.lower()
-
-        # Extract number
-        price_numbers = re.findall(r'\d+', price)
-        price_value = int(price_numbers[0]) if price_numbers else None
-
-        # Detect unit hints
-        unit = None
-        if "lakh" in price_lower or "lac" in price_lower:
-            unit = "Lakh"
-        elif "crore" in price_lower:
-            unit = "Crore"
-        elif "million" in price_lower:
-            unit = "Million"
-
-        # If not explicit, infer based on value
-        if not unit and price_value:
-            if 1_00_000 <= price_value < 1_00_00_000:
-                unit = "Lakh"
-                price_value = price_value / 1_00_000
-            elif price_value >= 1_00_00_000:
-                unit = "Crore"
-                price_value = price_value / 1_00_00_000
-            elif price_value >= 10_00_000:
-                unit = "Million"
-                price_value = price_value / 10_00_000
-
-        # Format price back
-        if price_value and unit:
-            cleaned_ad["Price"] = f"{price_value:.2f} {unit}"
-        elif price_value:
-            cleaned_ad["Price"] = f"{price_value}"
-
-        # Remove junk ads
-        all_fields = [cleaned_ad.get("Type", "").strip().lower(),
-                      cleaned_ad.get("Address", "").strip().lower()]
-        if any(val in junk_keywords for val in all_fields):
-            continue
+        contact = cleaned_ad.get("Contact_Number", "")
+        contact = re.sub(r'\D', '', contact)
+        cleaned_ad["Contact_Number"] = contact
 
         translated.append(cleaned_ad)
 
     return translated
-
 
 # =============== Generate IDs ===============
 def generate_ids(df):
@@ -271,16 +226,11 @@ def generate_ids(df):
             if name in paper:
                 code = abbr
                 break
-        ids.append(f"{date_str}/{code}/{str(idx+1).zfill(4)}")
+        ids.append(f"{date_str}{code}{str(idx+1).zfill(4)}")
 
     df["ID"] = ids
-
-    # Reorder columns: put ID first
-    cols = df.columns.tolist()
-    cols.insert(0, cols.pop(cols.index("ID")))
-    df = df[cols]
-
-    return df
+    cols = ["ID"] + [col for col in df.columns if col != "ID"]
+    return df[cols]
 
 # =============== Full Pipeline ===============
 def process_image(image_path):

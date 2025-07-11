@@ -29,8 +29,6 @@ translator = load_translator()
 model = load_gemini_model()
 
 # =============== Newspaper Detection + Date Extraction ===============
-import dateparser
-
 def detect_newspaper_name_and_date(image_path):
     try:
         img = cv2.imread(image_path)
@@ -57,7 +55,6 @@ def detect_newspaper_name_and_date(image_path):
                 detected_name = paper
                 break
 
-        # Add more patterns
         date_pattern = r'\b(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b'
         match = re.search(date_pattern, combined_text)
         detected_date = match.group(1) if match else "Unknown Date"
@@ -69,6 +66,12 @@ def detect_newspaper_name_and_date(image_path):
             except:
                 pass
 
+        if detected_name != "Unknown Newspaper":
+            try:
+                detected_name = translator.translate(detected_name)
+            except:
+                pass
+
         st.write("📰 Detected Text (Partial):", combined_text[:500])
         st.write(f"✅ Newspaper: {detected_name} | 🗓️ Date: {detected_date}")
 
@@ -77,7 +80,6 @@ def detect_newspaper_name_and_date(image_path):
     except Exception as e:
         st.error(f"❌ Newspaper detection/date extraction error: {e}")
         return "Unknown Newspaper", "Unknown Date"
-
 
 # =============== Segment Function ===============
 def segment_image(image_path, resize_width=1200):
@@ -149,7 +151,7 @@ No explanation. Just JSON.
 
 # =============== Translate & Clean Function ===============
 def translate_and_clean_ads(ads):
-    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    weekdays = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
     junk_keywords = {"drop", "engine", "ad", "classified", "advertisement"}
     translated = []
 
@@ -165,7 +167,6 @@ def translate_and_clean_ads(ads):
             else:
                 cleaned_ad[key] = value
 
-        # Re-parse and format date
         if cleaned_ad["Date"] and cleaned_ad["Date"] != "Unknown Date":
             try:
                 parsed_date = parser.parse(cleaned_ad["Date"], dayfirst=True)
@@ -173,7 +174,6 @@ def translate_and_clean_ads(ads):
             except:
                 pass
 
-        # Fix Var and SqFeet logic
         var = cleaned_ad.get("Var", "").lower()
         if any(day in var for day in weekdays):
             cleaned_ad["Var"] = ""
@@ -199,88 +199,22 @@ def translate_and_clean_ads(ads):
         cleaned_ad["Var"] = f"{var_val:.2f}" if var_val else ""
         cleaned_ad["SqFeet"] = f"{sqfeet_val:.2f}" if sqfeet_val else ""
 
-        # Fix Address
+        # STRONG Address Clean
         addr = cleaned_ad.get("Address", "").strip()
         addr = re.sub(r'[^A-Za-z0-9 ,.-]', '', addr)
         if len(addr) < 5:
             addr = ""
         cleaned_ad["Address"] = addr
 
-        # ================= PRICE UNIT LOGIC ==================
-        price = cleaned_ad.get("Price", "")
-        price_lower = price.lower()
-
-        # Extract number
-        price_numbers = re.findall(r'\d+', price)
-        price_value = int(price_numbers[0]) if price_numbers else None
-
-        # Detect unit hints
-        unit = None
-        if "lakh" in price_lower or "lac" in price_lower:
-            unit = "Lakh"
-        elif "crore" in price_lower:
-            unit = "Crore"
-        elif "million" in price_lower:
-            unit = "Million"
-
-        # If not explicit, infer based on value
-        if not unit and price_value:
-            if 1_00_000 <= price_value < 1_00_00_000:
-                unit = "Lakh"
-                price_value = price_value / 1_00_000
-            elif price_value >= 1_00_00_000:
-                unit = "Crore"
-                price_value = price_value / 1_00_00_000
-            elif price_value >= 10_00_000:
-                unit = "Million"
-                price_value = price_value / 10_00_000
-
-        # Format price back
-        if price_value and unit:
-            cleaned_ad["Price"] = f"{price_value:.2f} {unit}"
-        elif price_value:
-            cleaned_ad["Price"] = f"{price_value}"
-
-        # Remove junk ads
+        # Filter obvious junk ads
         all_fields = [cleaned_ad.get("Type", "").strip().lower(),
                       cleaned_ad.get("Address", "").strip().lower()]
         if any(val in junk_keywords for val in all_fields):
-            continue
+            continue  # skip this ad
 
         translated.append(cleaned_ad)
 
     return translated
-
-
-# =============== Generate IDs ===============
-def generate_ids(df):
-    newspaper_map = {
-        "gujarat samachar": "GUSM",
-        "sandesh": "SNDE",
-        "times of india": "TOIN",
-        "nav gujarat samay": "NVGJ",
-        "divya bhaskar": "DVBH"
-    }
-
-    ids = []
-    for idx, row in df.iterrows():
-        date_str = row["Date"].replace("-", "")
-        paper = row["Newspaper_Name"].lower()
-        code = "UNK"
-        for name, abbr in newspaper_map.items():
-            if name in paper:
-                code = abbr
-                break
-        ids.append(f"{date_str}/{code}/{str(idx+1).zfill(4)}")
-
-    df["ID"] = ids
-
-    # Reorder columns: put ID first
-    cols = df.columns.tolist()
-    cols.insert(0, cols.pop(cols.index("ID")))
-    df = df[cols]
-
-    return df
 
 # =============== Full Pipeline ===============
 def process_image(image_path):
@@ -322,7 +256,6 @@ if uploaded_files:
         if all_ads:
             df = pd.DataFrame(all_ads)
             df.drop_duplicates(inplace=True)
-            df = generate_ids(df)
             st.session_state["ads_df"] = df
             st.success(f"✅ Extracted ads from {len(uploaded_files)} image(s)!")
         else:
