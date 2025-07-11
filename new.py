@@ -29,8 +29,6 @@ translator = load_translator()
 model = load_gemini_model()
 
 # =============== Newspaper Detection + Date Extraction ===============
-import dateparser
-
 def detect_newspaper_name_and_date(image_path):
     try:
         img = cv2.imread(image_path)
@@ -57,7 +55,6 @@ def detect_newspaper_name_and_date(image_path):
                 detected_name = paper
                 break
 
-        # Add more patterns
         date_pattern = r'\b(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})\b'
         match = re.search(date_pattern, combined_text)
         detected_date = match.group(1) if match else "Unknown Date"
@@ -77,7 +74,6 @@ def detect_newspaper_name_and_date(image_path):
     except Exception as e:
         st.error(f"❌ Newspaper detection/date extraction error: {e}")
         return "Unknown Newspaper", "Unknown Date"
-
 
 # =============== Segment Function ===============
 def segment_image(image_path, resize_width=1200):
@@ -121,8 +117,8 @@ You are an expert at extracting property ads. Return only this JSON:
   "ads": [
     {{
       "Type": "",
-      "Var": "",
-      "SqFeet": "",
+      "Property": "",
+      "UOM": "",
       "Address": "",
       "Contact_Number": "",
       "Property_For": "",
@@ -148,8 +144,23 @@ No explanation. Just JSON.
     return []
 
 # =============== Translate & Clean Function ===============
+def normalize_uom(uom_text):
+    if not uom_text:
+        return ""
+    uom_text = uom_text.lower()
+    if any(u in uom_text for u in ["sq ft", "sqft", "sq. ft", "square feet"]):
+        return "SqFt"
+    if any(u in uom_text for u in ["sq yard", "sq. yd", "square yard"]):
+        return "SqYard"
+    if "bigha" in uom_text:
+        return "Bigha"
+    if "acre" in uom_text:
+        return "Acre"
+    if "hectare" in uom_text:
+        return "Hectare"
+    return uom_text.title()
+
 def translate_and_clean_ads(ads):
-    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     junk_keywords = {"drop", "engine", "ad", "classified", "advertisement"}
     translated = []
 
@@ -165,7 +176,7 @@ def translate_and_clean_ads(ads):
             else:
                 cleaned_ad[key] = value
 
-        # Re-parse and format date
+        # Format Date
         if cleaned_ad["Date"] and cleaned_ad["Date"] != "Unknown Date":
             try:
                 parsed_date = parser.parse(cleaned_ad["Date"], dayfirst=True)
@@ -173,57 +184,23 @@ def translate_and_clean_ads(ads):
             except:
                 pass
 
-        # Fix Var and SqFeet logic
-        var = cleaned_ad.get("Var", "").lower()
-        if any(day in var for day in weekdays):
-            cleaned_ad["Var"] = ""
-        else:
-            var_numbers = re.findall(r'\d+', var)
-            cleaned_ad["Var"] = var_numbers[0] if var_numbers else ""
-
-        sqfeet = cleaned_ad.get("SqFeet", "")
-        try:
-            var_val = float(cleaned_ad["Var"]) if cleaned_ad["Var"] else None
-        except:
-            var_val = None
-        try:
-            sqfeet_val = float(re.findall(r'\d+', sqfeet)[0]) if sqfeet else None
-        except:
-            sqfeet_val = None
-
-        if var_val and not sqfeet_val:
-            sqfeet_val = var_val * 9
-        elif sqfeet_val and not var_val:
-            var_val = sqfeet_val / 9
-
-        cleaned_ad["Var"] = f"{var_val:.2f}" if var_val else ""
-        cleaned_ad["SqFeet"] = f"{sqfeet_val:.2f}" if sqfeet_val else ""
-
-        # Fix Address
+        # Address clean
         addr = cleaned_ad.get("Address", "").strip()
         addr = re.sub(r'[^A-Za-z0-9 ,.-]', '', addr)
-        if len(addr) < 5:
-            addr = ""
-        cleaned_ad["Address"] = addr
+        cleaned_ad["Address"] = addr if len(addr) >= 5 else ""
 
-        # ================= PRICE UNIT LOGIC ==================
+        # Price clean
         price = cleaned_ad.get("Price", "")
-        price_lower = price.lower()
-
-        # Extract number
         price_numbers = re.findall(r'\d+', price)
         price_value = int(price_numbers[0]) if price_numbers else None
-
-        # Detect unit hints
         unit = None
+        price_lower = price.lower()
+
         if "lakh" in price_lower or "lac" in price_lower:
             unit = "Lakh"
         elif "crore" in price_lower:
             unit = "Crore"
-        elif "million" in price_lower:
-            unit = "Million"
 
-        # If not explicit, infer based on value
         if not unit and price_value:
             if 1_00_000 <= price_value < 1_00_00_000:
                 unit = "Lakh"
@@ -231,26 +208,23 @@ def translate_and_clean_ads(ads):
             elif price_value >= 1_00_00_000:
                 unit = "Crore"
                 price_value = price_value / 1_00_00_000
-            elif price_value >= 10_00_000:
-                unit = "Million"
-                price_value = price_value / 10_00_000
 
-        # Format price back
         if price_value and unit:
             cleaned_ad["Price"] = f"{price_value:.2f} {unit}"
         elif price_value:
-            cleaned_ad["Price"] = f"{price_value}"
+            cleaned_ad["Price"] = str(price_value)
 
-        # Remove junk ads
-        all_fields = [cleaned_ad.get("Type", "").strip().lower(),
-                      cleaned_ad.get("Address", "").strip().lower()]
-        if any(val in junk_keywords for val in all_fields):
+        # UOM normalization
+        cleaned_ad["UOM"] = normalize_uom(cleaned_ad.get("UOM", ""))
+        cleaned_ad["Property"] = re.sub(r'[^\d.]', '', cleaned_ad.get("Property", ""))
+
+        # Skip junk ads
+        if any(jk in cleaned_ad.get("Type", "").lower() for jk in junk_keywords):
             continue
 
         translated.append(cleaned_ad)
 
     return translated
-
 
 # =============== Generate IDs ===============
 def generate_ids(df):
@@ -274,13 +248,9 @@ def generate_ids(df):
         ids.append(f"{date_str}/{code}/{str(idx+1).zfill(4)}")
 
     df["ID"] = ids
-
-    # Reorder columns: put ID first
     cols = df.columns.tolist()
     cols.insert(0, cols.pop(cols.index("ID")))
-    df = df[cols]
-
-    return df
+    return df[cols]
 
 # =============== Full Pipeline ===============
 def process_image(image_path):
